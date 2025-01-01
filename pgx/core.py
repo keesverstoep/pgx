@@ -41,6 +41,7 @@ FALSE = jnp.bool_(False)
 EnvId = Literal[
     "2048",
     "animal_shogi",
+    "awari",
     "backgammon",
     "bridge_bidding",
     "chess",
@@ -303,7 +304,7 @@ def available_envs() -> Tuple[EnvId, ...]:
 
         ```py
         pgx.available_envs()
-        ('2048', 'animal_shogi', 'backgammon', 'chess', 'connect_four', 'go_9x9', 'go_19x19', 'hex', 'kuhn_poker', 'leduc_holdem', 'minatar-asterix', 'minatar-breakout', 'minatar-freeway', 'minatar-seaquest', 'minatar-space_invaders', 'othello', 'shogi', 'sparrow_mahjong', 'tic_tac_toe')
+        ('2048', 'animal_shogi', 'awari', 'backgammon', 'chess', 'connect_four', 'go_9x9', 'go_19x19', 'hex', 'kuhn_poker', 'leduc_holdem', 'minatar-asterix', 'minatar-breakout', 'minatar-freeway', 'minatar-seaquest', 'minatar-space_invaders', 'othello', 'shogi', 'sparrow_mahjong', 'tic_tac_toe')
         ```
 
 
@@ -345,6 +346,10 @@ def make(env_id: EnvId):  # noqa: C901
         from pgx.animal_shogi import AnimalShogi
 
         return AnimalShogi()
+    elif env_id == "awari":
+        from pgx.awari import Awari
+
+        return Awari()
     elif env_id == "backgammon":
         from pgx.backgammon import Backgammon
 

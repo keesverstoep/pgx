@@ -211,6 +211,35 @@ class Visualizer:
                     "black",
                     "",
                 )
+        elif _state.env_id == "awari":
+            from pgx._src.dwg.awari import _make_awari_dwg
+
+            self.config["GRID_SIZE"] = 50
+            self.config["BOARD_WIDTH"] = 6
+            self.config["BOARD_HEIGHT"] = 4
+            self._make_dwg_group = _make_awari_dwg  # type:ignore
+            if (self.config["COLOR_THEME"] is None and self.config["COLOR_THEME"] == "dark") or self.config[
+                "COLOR_THEME"
+            ] == "dark":
+                self.config["COLOR_SET"] = ColorSet(
+                    "lightgray",
+                    "",
+                    "",
+                    "",
+                    "#1e1e1e",
+                    "black",
+                    "white",
+                )
+            else:
+                self.config["COLOR_SET"] = ColorSet(
+                    "black",
+                    "#f0f0f0",
+                    "",
+                    "",
+                    "white",
+                    "black",
+                    "black",
+                )
         elif _state.env_id == "backgammon":
             from pgx._src.dwg.backgammon import _make_backgammon_dwg
 
