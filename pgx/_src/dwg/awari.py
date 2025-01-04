@@ -4,14 +4,15 @@ from pgx.awari import State as AwariState
 
 def _make_awari_dwg(dwg, state: AwariState, config):
     GRID_SIZE = config["GRID_SIZE"]
-    BOARD_SIZE = config["BOARD_WIDTH"]
+    BOARD_WIDTH = config["BOARD_WIDTH"]
+    BOARD_HEIGHT = config["BOARD_HEIGHT"]
     color_set = config["COLOR_SET"]
 
     # background
     dwg.add(
         dwg.rect(
             (0, 0),
-            (BOARD_SIZE * GRID_SIZE, BOARD_SIZE * GRID_SIZE),
+            (BOARD_WIDTH * GRID_SIZE, BOARD_HEIGHT * GRID_SIZE),
             fill=color_set.background_color,
         )
     )
@@ -19,10 +20,34 @@ def _make_awari_dwg(dwg, state: AwariState, config):
     # board
     # grid
     board_g = dwg.g()
+    pit_map = {
+        # own stones
+        0: (6, 0),
+        1: (5, 0),
+        2: (4, 0),
+        3: (3, 0),
+        4: (2, 0),
+        5: (1, 0),
+        # other stones
+        6: (1, 2),
+        7: (2, 2),
+        8: (3, 2),
+        9: (4, 2),
+        10: (5, 2),
+        11: (6, 2),
+        # own home
+        17: (0, 1),
+        # other home
+        23: (7, 1),
+    }
     for i, _num in enumerate(state._x.board):
         num = int(_num)
-        x = (i % 6) * GRID_SIZE
-        y = (i // 6) * GRID_SIZE
+        if i in pit_map.keys():
+            x, y = pit_map[i]
+            x = x * GRID_SIZE
+            y = y * GRID_SIZE
+        else:
+            continue
         _color = f"{128:02x}"
         board_g.add(
             dwg.rect(
