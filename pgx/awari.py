@@ -23,9 +23,10 @@ from pgx._src.games.awari import Game, GameState
 from pgx._src.struct import dataclass
 from pgx._src.types import Array, PRNGKey
 
-# Set max steps just below 128 since this is the default
-# for some training frameworks using PGX
-MAX_TERMINATION_STEPS = 126
+# Set max steps just below 256 since this is a common max step setting
+# for some training frameworks using PGX.
+# Setting it below 128 may result in too many early draws for games.
+MAX_TERMINATION_STEPS = 254
 
 @dataclass
 class State(core.State):

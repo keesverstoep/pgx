@@ -39,7 +39,9 @@ def make_baseline_model(model_id: BaselineModelId, download_dir: str = "baseline
     ):
         return _make_minatar_baseline_model(model_id, download_dir)
     else:
-        assert False
+        # game for which not baseline exists should not be fatal,
+        # so let caller deal with it
+        return None
 
 
 def _make_az_baseline_model(model_id: BaselineModelId, download_dir: str = "baselines"):

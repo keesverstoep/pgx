@@ -1,0 +1,60 @@
+#!/bin/sh
+
+# Configure KataGo directory
+bindir=../../../../KataGo/src/KataGo/cpp
+
+if [ $# -lt 3 ]; then
+   echo "Usage: $0 [depth] [time] [color] [movelist]" >&2
+   exit 1
+fi
+
+# depth: maps to a specific KataGo model with known relative strength
+depth="$1"
+# time: instead used as a playouts parameter, selecting corresponding config file:
+time="$2"
+
+color="$3"
+shift
+shift
+shift
+
+# change directory to let application access its supporting resources
+cd ${bindir}
+
+# For selfplay based networks, see https://katagotraining.org/networks/
+#default:
+model=b6c96-s73091584-d10630987/model.txt.gz
+
+case ${depth} in
+23) model=b10c128-s41138688-d27396855/model.txt.gz;; # ELO 10139.4
+24) model=b6c96-s73091584-d10630987/model.txt.gz;;   # ELO 9003.0
+25) model=b6c96-s48921344-d7092247/model.txt.gz;;    # ELO 8085.4 
+26) model=b6c96-s37368064-d5536083/model.txt.gz;;    # ELO 7096.8
+27) model=b6c96-s30394624-d4635675/model.txt.gz;;    # ELO 6172.8
+28) model=b6c96-s25461504-d4002500/model.txt.gz;;    # ELO 5145.7
+29) model=b6c96-s19408128-d3280178/model.txt.gz;;    # ELO 4163.2 
+30) model=b6c96-s14649344-d2727367/model.txt.gz;;    # ELO 3097.5
+31) model=b6c96-s10014464-d2201128/model.txt.gz;;    # ELO 2115.2 
+32) model=b6c96-s1995008-d1329786/model.txt.gz;;     # ELO 1072.4
+33) model=b6c96-s1248000-d550347/model.txt.gz;;      # ELO  481.9
+esac
+
+(
+ echo boardsize 9
+ sleep 0.1
+ echo clear_board
+ sleep 0.1
+ cur="b"
+ while [ $# -gt 0 ]; do
+     echo play $cur $1
+     sleep 0.01
+     if [ "$cur" = b ]; then
+	 cur=w
+     else
+	 cur=b
+     fi
+     shift
+  done
+  echo genmove ${color}
+) | ./katago gtp -model "../../../${model}" -config gtp-playouts${time}.cfg 2>/dev/null | grep '^= [A-Za-z]' | awk '{ print $2 }'
+

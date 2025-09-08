@@ -1,0 +1,23 @@
+#!/bin/sh
+
+# Configure Edax directory
+bindir=../../../../edax-othello
+
+if [ $# -ne 4 ]; then
+   echo "Usage: $0 [fen] [color] [depth] [time]" >&2
+   exit 1
+fi
+
+fen="$1"
+color="$2"
+depth="$3"
+time="$4"
+
+# change directory to edax to let it access its default data/eval.dat and data/book.dat
+cd ${bindir}
+
+(
+ echo setboard ${fen} ${color}
+ sleep 0.1
+ echo go
+ sleep 0.1 ) | ./edax-4.4 -l ${depth} | fgrep 'Edax plays' | awk '{ print $NF }'

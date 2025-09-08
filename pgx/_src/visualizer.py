@@ -215,8 +215,10 @@ class Visualizer:
             from pgx._src.dwg.awari import _make_awari_dwg
 
             self.config["GRID_SIZE"] = 50
-            self.config["BOARD_WIDTH"] = 6
-            self.config["BOARD_HEIGHT"] = 4
+            # use conventional board layout with opposing pits per
+            # player and the two home pits distinctly on the sides
+            self.config["BOARD_WIDTH"] = 8
+            self.config["BOARD_HEIGHT"] = 3
             self._make_dwg_group = _make_awari_dwg  # type:ignore
             if (self.config["COLOR_THEME"] is None and self.config["COLOR_THEME"] == "dark") or self.config[
                 "COLOR_THEME"

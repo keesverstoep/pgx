@@ -1,0 +1,25 @@
+#!/bin/sh
+
+# Configure Fairly-Stockfish directory, supporting Gardner Chess
+bindir=../../../../Fairy-Stockfish/src
+
+if [ $# -ne 4 ]; then
+   echo "Usage: $0 [fen] [color] [depth] [time]" >&2
+   exit 1
+fi
+
+fen="$1"
+color="$2"
+depth="$3"
+time="$4"
+
+(echo uci;
+ sleep 0.1;
+ echo setoption name UCI_Variant value gardner;
+ sleep 0.1;
+ echo position startpos;
+ sleep 0.1;
+ echo position fen ${fen} ${color} - - 0 1;
+ sleep 0.1;
+ echo go depth ${depth} movetime ${time};
+ sleep 1) | ${bindir}/stockfish | grep bestmove | awk '{ print $2 }'
