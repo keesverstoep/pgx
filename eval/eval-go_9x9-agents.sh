@@ -37,4 +37,4 @@ export CHECKPOINT=${CHECKPOINT_DIR}/${MODEL_BASE}/${model}.ckpt
 
 echo Using checkpoint ${CHECKPOINT}
 
-python3 -u eval/eval-agents.py env_id=$ENV_ID > eval-${MODEL_BASE}-v${model}-nsim${NUM_SIMULATIONS}-AOP${ORACLE_DEPTH}-${ORACLE_TIME}.out
+python3 -u eval/eval-agents.py env_id=$ENV_ID >> eval-${MODEL_BASE}-v${model}-nsim${NUM_SIMULATIONS}-AOP${ORACLE_DEPTH}-${ORACLE_TIME}.out

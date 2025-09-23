@@ -15,10 +15,8 @@
 #
 
 import os
-# import goedels
-# import binomium
-from . import goedels
-from . import binomium
+import goedels
+import binomium
 
 awari_path = os.getenv("AWARI_PATH", ".") 
 
@@ -43,7 +41,6 @@ goedel_state_counts = []
 goedel_cumulative_state_counts = []
 
 
-# class Board():
 class db_board():
     def __init__(self, pit0, pit1, pit2, pit3, pit4, pit5, pit6, pit7, pit8, pit9, pit10, pit11):
         self.pits = [pit0, pit1, pit2, pit3, pit4, pit5, pit6, pit7, pit8, pit9, pit10, pit11]
@@ -126,11 +123,36 @@ class db_board():
     def nrStates(self, nrSeeds):
         return goedel_arr[11][nrSeeds + 8][6]
 
+    def next_board(self):
+        pits = self.pits.copy()
+        if pits[0] > 0:
+            pits[0] -= 1
+            pits[1] += 1
+        else:
+            # pits[12] = 1; /* stop next loop at end of pits[] */
+            pit = 0;
+
+            while pit < 12 and pits[pit] == 0:
+                pit += 1
+
+            if pit < 12:
+                pits[0] = pits[pit] - 1
+                pits[pit] = 0
+                if pit < 11:
+                    pits[pit + 1] += 1
+
+            #if defined OMIT_UNREACHABLE_STATES
+            if pit == 5 and (pits[6] > 0 and pits[7] > 0 and pits[8] > 0 and 
+                            pits[9] > 0 and pits[10] > 0 and pits[11] > 0):
+                pits[6] = 0
+                pits[7] += 1
+        return db_board(pits[0],pits[1],pits[2],pits[3],pits[4],pits[5],
+	                pits[6],pits[7],pits[8],pits[9],pits[10],pits[11])
+
     def quick_score(self, goedelNumber, nrSeeds):
         if nrSeeds >= 21:
             return 0
 
-        qdb_index = goedel_cumulative_state_counts[nrSeeds] + goedelNumber
         if nrSeeds == 0:
             cumulative = 0
         else:
@@ -189,8 +211,13 @@ def goedel_set_state_counts():
     global goedel_cumulative_state_counts
 
     total = 0
-    for i in range(46):
-        # b =  Board(i, 0, 0, 0, 0, 0,
+    for i in range(48):
+        if i == 47:
+            # 47 stone db itself does not exist
+            goedel_state_counts.append(0)
+            # copy previous cumulative count
+            goedel_cumulative_state_counts.append(goedel_cumulative_state_counts[-1])
+            continue
         b =  db_board(i, 0, 0, 0, 0, 0,
                    0, 0, 0, 0, 0, 0)
         nrstates = b.nrStates(i)
@@ -204,8 +231,10 @@ def goedel_set_state_counts():
 # init:
 goedel_set_state_counts()
 
+def get_goedel_cumulative_state_count(nr_seeds):
+    return goedel_cumulative_state_counts[nr_seeds]
+
 def test_board(pits):
-   #  b =  Board(pits[0],pits[1],pits[2],pits[3],pits[4],pits[5],
     b =  db_board(pits[0],pits[1],pits[2],pits[3],pits[4],pits[5],
 	       pits[6],pits[7],pits[8],pits[9],pits[10],pits[11])
     print(b)
@@ -218,7 +247,6 @@ def test_board(pits):
     print()
 
 def test_position(pits):
-    # b =  Board(pits[0],pits[1],pits[2],pits[3],pits[4],pits[5],
     b =  db_board(pits[0],pits[1],pits[2],pits[3],pits[4],pits[5],
 	       pits[6],pits[7],pits[8],pits[9],pits[10],pits[11])
     print(b)

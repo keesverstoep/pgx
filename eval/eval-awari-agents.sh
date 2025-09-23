@@ -4,7 +4,7 @@
 # For running under a cluster environment, add the suitable SBATCH directives,
 # Python and GPU environment initialisation.
 
-export PYTHONPATH=`pwd`:`pwd`/eval:`pwd`/examples/alphazero
+export PYTHONPATH=`pwd`:`pwd`/eval:`pwd`/eval/awari_db:`pwd`/examples/alphazero
 
 CHECKPOINT_DIR=`pwd`/examples/alphazero/checkpoints
 
@@ -38,4 +38,4 @@ export CHECKPOINT=${CHECKPOINT_DIR}/${MODEL_BASE}/${model}.ckpt
 
 echo Using checkpoint ${CHECKPOINT}
 
-python3 -u eval/eval-agents.py env_id=$ENV_ID > eval-${MODEL_BASE}-v${model}-nsim${NUM_SIMULATIONS}-AOP${ORACLE_MISTAKE_CHANCE_LABEL}-${ORACLE_MISTAKE_MAX}.out
+python3 -u eval/eval-agents.py env_id=$ENV_ID >> eval-${MODEL_BASE}-v${model}-nsim${NUM_SIMULATIONS}-AOP${ORACLE_MISTAKE_CHANCE_LABEL}-${ORACLE_MISTAKE_MAX}.out

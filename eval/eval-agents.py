@@ -570,12 +570,21 @@ def agent_vs_oracle(
                     # agent_turn is also used for oracle2
                     action = external_player2.play(state, swap_color, move_trace, debug)
                 else:
-                    action = external_player.play(state, swap_color, move_trace, debug)
+                    # action = external_player.play(state, swap_color, move_trace, debug)
+                    action = external_player.play(state, swap_color, move_trace, verbose)
                 if debug:
                     print(f"# External opponent selected action {action}")
+                if action < 0 or action > len(state.legal_action_mask[0]) or \
+                    not state.legal_action_mask[0][action]:
+                    # warn external agent returned invalid action, and quit game
+                    print("INVALID action", action, "mask", state.legal_action_mask[0])
+                    break
                 action = jnp.int32([action])
                 if verbose:
                     print("external action", action[0])
+                if ENV_ID == "awari" and eval_moves:
+                    action_id = int(action[0])
+                    eval_oracle.append(external_player.evaluate(state, action_id, debug))
 
             state = step_fn(state, action)
             move_trace.append(int(action[0]))
@@ -663,7 +672,6 @@ def main(
     # num_simulations_per_move: int = NUM_SIMULATIONS,
     verbose: bool = True,
 ):
-    warnings.filterwarnings("ignore")
     if mode == "agent_vs_oracle":
         agent_vs_oracle(
             num_simulations_per_move=NUM_SIMULATIONS,

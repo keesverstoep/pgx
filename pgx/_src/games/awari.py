@@ -38,6 +38,8 @@ from typing import Tuple
 
 import chex
 
+MAX_TERMINATION_STEPS = 256
+
 # Array used for implementing the sowing logic, which has
 # to skip the pit from which the stones are sown from.
 next = jnp.int32([
@@ -80,6 +82,15 @@ INIT_BOARD = jnp.int32([
 NUM_ROWS = 1
 NUM_COLS = 24
 
+# adapted from gardner_chess
+key = jax.random.PRNGKey(238942)
+key, subkey = jax.random.split(key)
+ZOBRIST_BOARD = jax.random.randint(subkey, shape=(12, 48, 2), minval=0, maxval=2**31 - 1, dtype=jnp.uint32)
+key, subkey = jax.random.split(key)
+ZOBRIST_SIDE = jax.random.randint(subkey, shape=(2,), minval=0, maxval=2**31 - 1, dtype=jnp.uint32)
+
+INIT_ZOBRIST_HASH = jnp.uint32([2025569903, 1172890342])
+
 class GameState(NamedTuple):
     current_player: Array = jnp.int32(0)
     rewards: Array = jnp.float32([0.0, 0.0])
@@ -91,6 +102,10 @@ class GameState(NamedTuple):
     winner: Array = jnp.int32(-1)
     # compare current_player to first_player to see if board needs flip
     first_player: Array = jnp.int32(0)
+    zobrist_hash: Array = jnp.uint32(INIT_ZOBRIST_HASH)
+    hash_history: Array = (
+         jnp.zeros((MAX_TERMINATION_STEPS + 1, 2), dtype=jnp.uint32).at[0].set(jnp.uint32(INIT_ZOBRIST_HASH))
+    )
 
     def init(self, current_player):
         self.current_player = current_player
@@ -296,6 +311,19 @@ def _step(state, action: chex.Array) -> Tuple["AwariGame", chex.Array]:
             remaining_pits.at[PIT_HOME_1].add(remaining_pieces_count),
             new_state_board)
 
+    # update hash hist
+    zobrist_hash = _zobrist_hash(1 - state.current_player, new_state_board)
+    hash_hist = jnp.roll(state.hash_history, 2)
+    # If the new position repeats a previous one, divide remaining stones.
+    # Round up since if the current score is 23 vs 22 then the 3 remaining
+    # should be 24.5 vs 23.5, so using int stones we make that 25 vs 24 instead
+    # of 24 vs 23 which would be a draw
+    repeat = (hash_hist == zobrist_hash).all(axis=1).sum()
+    new_state_board = jax.lax.select(repeat == 0, new_state_board, 
+            remaining_pits.at[PIT_HOME_0].add((remaining_pieces_count + 1) // 2).
+                           at[PIT_HOME_1].add((remaining_pieces_count + 1) // 2))
+    hash_hist = hash_hist.at[0].set(zobrist_hash)
+
     # set winner if one player has a majority of stones
     winner0 = (new_state_board[PIT_HOME_0] > NUM_STONES / 2)
     winner1 = (new_state_board[PIT_HOME_1] > NUM_STONES / 2)
@@ -342,7 +370,22 @@ def _step(state, action: chex.Array) -> Tuple["AwariGame", chex.Array]:
          terminated=new_state_terminated,
          board=returned_new_state_board,
          winner=new_state_winner,
+         zobrist_hash = zobrist_hash,
+         hash_history = hash_hist,
     )
+
+# adapted from gardner_chess
+def _zobrist_hash(player, board):
+    hash_ = jnp.zeros(2, dtype=jnp.uint32)
+    hash_ = jax.lax.select(player == 0, hash_, hash_ ^ ZOBRIST_SIDE)
+
+    def xor(i, h):
+        piece = board[i]
+        return h ^ ZOBRIST_BOARD[i, piece]
+
+    # only need to look at uncaptured stones for repeat positions
+    hash_ = jax.lax.fori_loop(0, 12, xor, hash_)
+    return hash_
 
 def _observe(state, player_id) -> chex.Array:
     _board = state.board

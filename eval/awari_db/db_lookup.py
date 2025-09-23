@@ -20,8 +20,7 @@
 # a position state and the child position score states.
 
 import sys
-# import Board
-from . import db_board
+import db_board
 
 NO_MOVE	= 127
 
@@ -57,6 +56,7 @@ def gen_board_and_child_scores(board):
         [ 1, 2, 3, 4, 5, 6, 7, 8,  9, 10,  0, 0, ],
     ]
 
+    children = [ -1, -1, -1, -1, -1, -1 ]
     children_scores = [ NO_MOVE, NO_MOVE, NO_MOVE, NO_MOVE, NO_MOVE, NO_MOVE]
 
     nr_seeds = board.count_seeds()
@@ -95,10 +95,10 @@ def gen_board_and_child_scores(board):
             elif has_eradicated_children:
                 reply_score = -nr_seeds
                 has_eradicated_children = False
+                children = [ -1, -1, -1, -1, -1, -1 ]
 
             has_children = True
 
-            # child = Board.Board(child_pits[0], child_pits[1], child_pits[2],
             child = db_board.db_board(child_pits[0], child_pits[1], child_pits[2],
                           child_pits[3], child_pits[4], child_pits[5],
                           child_pits[6], child_pits[7], child_pits[8],
@@ -111,15 +111,19 @@ def gen_board_and_child_scores(board):
             if reply_score < children_scores[pit1]:
                 reply_score = children_scores[pit1]
 
-    return reply_score, children_scores
+            if child_seeds == 0:
+                cumulative = 0
+            else:
+                cumulative = db_board.get_goedel_cumulative_state_count(child_seeds - 1)
+            children[pit1] = cumulative + child_goedel
 
+    return reply_score, children_scores, children
 
 if __name__ == "__main__":
     if len(sys.argv) != 13:
         print("Usage: %s [pit1] .. [pit12]" % sys.argv[0])
         sys.exit(1)
 
-    # b = Board.Board(int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]),
     b = db_board.db_board(int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]),
                     int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6]),
                     int(sys.argv[7]), int(sys.argv[8]), int(sys.argv[9]),
@@ -130,7 +134,7 @@ if __name__ == "__main__":
         print(b.pits[i], end=" ")
     print()
 
-    score, child_scores = gen_board_and_child_scores(b)
+    score, child_scores, children = gen_board_and_child_scores(b)
     print("score:", score)
     print("children scores: ", end=" ")
     for i in range(len(child_scores)):

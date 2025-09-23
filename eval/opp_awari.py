@@ -25,6 +25,8 @@ class AwariOraclePlayer(ExternalPlayer):
     def __init__(self, mistake_fraction = 0.0, mistake_max = 4):
         self.mistake_fraction = mistake_fraction
         self.mistake_max = mistake_max
+        # enable next if additional database is available
+        self.quick_db = True
 
     def print_valid(self, env, swap_color, trace, verbose):
         print("legal_action_mask", env.legal_action_mask[0], "swap_color", swap_color)
@@ -152,17 +154,42 @@ class AwariOraclePlayer(ExternalPlayer):
         board = db_board(pieces[0], pieces[1], pieces[2], pieces[3], pieces[4], pieces[5],
                          pieces[6], pieces[7], pieces[8], pieces[9], pieces[10], pieces[11])
 
-        overall_score, scores = gen_board_and_child_scores(board)
+        overall_score, scores, _ = gen_board_and_child_scores(board)
         if verbose:
             print("score", overall_score)
             print("child_scores", scores)
+
+        preferred = [ True, True, True, True, True, True ]
+        if self.quick_db:
+            # For positions up to 21 stones there may be a preference for moves that
+            # lead to a quicker win, e.g., ones that may avoid a draw to repeated position.
+            # They are bitmaps stored in a separtely constructed "quick" database.
+            seeds = board.count_seeds()
+            if seeds < 21:
+                g = board.GoedelNumber(seeds)
+                quick_score = board.quick_score(g, seeds)
+                if verbose:
+                    print("quick_score", quick_score)
+                if quick_score != 0:
+                    if (quick_score & 0x01) == 0:
+                        preferred[0] = False
+                    if (quick_score & 0x02) == 0:
+                        preferred[1] = False
+                    if (quick_score & 0x04) == 0:
+                        preferred[2] = False
+                    if (quick_score & 0x08) == 0:
+                        preferred[3] = False
+                    if (quick_score & 0x10) == 0:
+                        preferred[4] = False
+                    if (quick_score & 0x20) == 0:
+                        preferred[5] = False
 
         best = -127
         best_i = 6
         # first find the best score, picking an arbitrary best when the same
         for i in range(6):
             # NOTE: the validity may not be observed by the scores
-            if valid[i] and scores[i] != 127:
+            if valid[i] and preferred[i] and  scores[i] != 127:
                 # pick best move, or choose between best ones;
                 # allow for mistakes if so desired
                 if scores[i] > best or (scores[i] == best and random.random() < 0.5):
@@ -188,31 +215,6 @@ class AwariOraclePlayer(ExternalPlayer):
                 select = next_best_i
                 if verbose:
                     print('op: select suboptimal move')
-        else:
-            # For positions up to 21 stones there may be a preference for moves that
-            # lead to a quicker win, e.g., ones that may avoid a draw to repeated position.
-            # They are bitmaps stored in a separtely constructed "quick" database.
-            seeds = board.count_seeds()
-            if seeds < 21:
-                g = board.GoedelNumber(seeds)
-                quick_score = board.quick_score(g, seeds)
-                select_quick = -1
-                if (quick_score & 0x01) != 0:
-                    select_quick = 0
-                elif (quick_score & 0x02) != 0:
-                    select_quick = 1
-                elif (quick_score & 0x04) != 0:
-                    select_quick = 2
-                elif (quick_score & 0x08) != 0:
-                    select_quick = 3
-                elif (quick_score & 0x10) != 0:
-                    select_quick = 4
-                elif (quick_score & 0x20) != 0:
-                    select_quick = 5
-                if select_quick > 0 and valid[select_quick]:
-                    if verbose:
-                        print('op: quick lookup', quick_score, 'pick', select_quick)
-                select = select_quick
 
         if verbose:
             print('op: select ' + str(select))
@@ -239,7 +241,7 @@ class AwariOraclePlayer(ExternalPlayer):
         b = db_board(pieces[0], pieces[1], pieces[2], pieces[3], pieces[4], pieces[5],
                      pieces[6], pieces[7], pieces[8], pieces[9], pieces[10], pieces[11])
 
-        overall_score, scores = gen_board_and_child_scores(b)
+        overall_score, scores, _ = gen_board_and_child_scores(b)
         if verbose:
             print("score", overall_score)
             print("child_scores", scores)
@@ -286,7 +288,7 @@ class AwariOraclePlayer(ExternalPlayer):
                               int(pieces[3]), int(pieces[4]), int(pieces[5]),
                               int(pieces[6]), int(pieces[7]), int(pieces[8]),
                               int(pieces[9]), int(pieces[10]), int(pieces[11]))
-        score, child_scores = gen_board_and_child_scores(b)
+        score, child_scores, _ = gen_board_and_child_scores(b)
         print("score", score)
         print("child_scores", child_scores)
         return child_scores
