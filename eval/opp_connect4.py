@@ -105,7 +105,7 @@ class Connect4OraclePlayer(ExternalPlayer):
         if self.debug:
             print('op: select ' + str(select))
 
-        return select
+        return select, scores
 
     def print_oracle_status(self, env, trace, swap_color):
         # TODO print actual oracle status, now only done verbose above in play()

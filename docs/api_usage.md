@@ -68,7 +68,7 @@ init_fn = jax.jit(jax.vmap(env.init))
 step_fn = jax.jit(jax.vmap(env.step))
 
 # Prepare baseline model
-# Note that it additionaly requires Haiku library ($ pip install dm-haiku)
+# Note that it additionally requires Flax ($ pip install "flax>=0.11.0")
 model_id = "go_9x9_v0"
 model = pgx.make_baseline_model(model_id)
 

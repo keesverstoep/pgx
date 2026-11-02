@@ -1,6 +1,6 @@
 import os
 import pickle
-from typing import Literal
+from typing import Literal, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -44,74 +44,53 @@ def make_baseline_model(model_id: BaselineModelId, download_dir: str = "baseline
         return None
 
 
+def _get_observation_shape(model_id: BaselineModelId) -> Sequence[int]:
+    # NNX modules initialize eagerly, so the input shape has to be known before
+    # the pretrained weights can be loaded into them.
+    from pgx.core import make
+
+    env_id = model_id[: -len("_v0")]
+    return make(env_id).observation_shape  # type: ignore[arg-type]
+
+
 def _make_az_baseline_model(model_id: BaselineModelId, download_dir: str = "baselines"):
-    import haiku as hk
+    from flax import nnx
 
     model_args, model_params, model_state = _load_baseline_model(model_id, download_dir)
-
-    def forward_fn(x, is_eval=False):
-        net = _create_az_model_v0(**model_args)
-        policy_out, value_out = net(x, is_training=not is_eval, test_local_stats=False)
-        return policy_out, value_out
-
-    forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
+    model = _create_az_model_v0(
+        **model_args,
+        in_shape=_get_observation_shape(model_id),
+        rngs=nnx.Rngs(0),
+    )
+    _convert_az_params(
+        model,
+        model_params,
+        model_state,
+        resnet_v2=model_args.get("resnet_v2", True),
+    )
+    model.eval()
 
     def apply(obs):
-        (logits, value), _ = forward.apply(model_params, model_state, obs, is_eval=True)
-        return logits, value
+        return model(obs)
 
     return apply
 
 
 def _make_minatar_baseline_model(model_id: BaselineModelId, download_dir: str = "baselines"):
-    import haiku as hk
+    from flax import nnx
 
     model_args, model_params, model_state = _load_baseline_model(model_id, download_dir)
     del model_state
-
-    class ActorCritic(hk.Module):
-        def __init__(self, num_actions, activation="tanh"):
-            super().__init__()
-            self.num_actions = num_actions
-            self.activation = activation
-            assert activation in ["relu", "tanh"]
-
-        def __call__(self, x):
-            x = x.astype(jnp.float32)
-            if self.activation == "relu":
-                activation = jax.nn.relu
-            else:
-                activation = jax.nn.tanh
-            x = hk.Conv2D(32, kernel_shape=2)(x)
-            x = jax.nn.relu(x)
-            x = hk.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="VALID")
-            x = x.reshape((x.shape[0], -1))  # flatten
-            x = hk.Linear(64)(x)
-            x = jax.nn.relu(x)
-            actor_mean = hk.Linear(64)(x)
-            actor_mean = activation(actor_mean)
-            actor_mean = hk.Linear(64)(actor_mean)
-            actor_mean = activation(actor_mean)
-            actor_mean = hk.Linear(self.num_actions)(actor_mean)
-
-            critic = hk.Linear(64)(x)
-            critic = activation(critic)
-            critic = hk.Linear(64)(critic)
-            critic = activation(critic)
-            critic = hk.Linear(1)(critic)
-
-            return actor_mean, jnp.squeeze(critic, axis=-1)
-
-    def forward_fn(x):
-        net = ActorCritic(**model_args)
-        logits, value = net(x)
-        return logits, value
-
-    forward = hk.without_apply_rng(hk.transform(forward_fn))
+    model = _create_minatar_model(
+        **model_args,
+        in_shape=_get_observation_shape(model_id),
+        rngs=nnx.Rngs(0),
+    )
+    _convert_minatar_params(model, model_params)
+    model.eval()
 
     def apply(obs):
-        logits, value = forward.apply(model_params, obs)
-        return logits, value
+        return model(obs)
 
     return apply
 
@@ -148,46 +127,168 @@ def _get_download_url(baseline_model: BaselineModelId) -> str:
     return urls[baseline_model]
 
 
+# ---------------------------------------------------------------------------
+# Weight loading helpers
+# ---------------------------------------------------------------------------
+
+
+def _get(tree, key):
+    """Read a Haiku parameter entry from a flat (``a/b``) or nested tree."""
+    if key in tree:
+        return tree[key]
+    node = tree
+    for part in key.split("/"):
+        node = node[part]
+    return node
+
+
+def _set_linear(layer, params):
+    layer.kernel[...] = params["w"]
+    layer.bias[...] = params["b"]
+
+
+def _set_conv(layer, params):
+    layer.kernel[...] = params["w"]
+    layer.bias[...] = params["b"]
+
+
+def _set_batch_norm(layer, params, mean_state, var_state):
+    layer.scale[...] = params["scale"].reshape((-1,))
+    layer.bias[...] = params["offset"].reshape((-1,))
+    layer.mean[...] = mean_state["average"].reshape((-1,))
+    layer.var[...] = var_state["average"].reshape((-1,))
+
+
+def _convert_az_params(model, params, state, resnet_v2: bool = True):
+    """Copy a Haiku AlphaZero parameter tree into an NNX module."""
+    _set_conv(model.conv_init, _get(params, "az_net/conv2_d"))
+
+    if resnet_v2:
+        _set_batch_norm(
+            model.bn_final,
+            _get(params, "az_net/batch_norm"),
+            _get(state, "az_net/batch_norm/~/mean_ema"),
+            _get(state, "az_net/batch_norm/~/var_ema"),
+        )
+    else:
+        _set_batch_norm(
+            model.bn_init,
+            _get(params, "az_net/batch_norm"),
+            _get(state, "az_net/batch_norm/~/mean_ema"),
+            _get(state, "az_net/batch_norm/~/var_ema"),
+        )
+
+    for i, block in enumerate(model.blocks):
+        prefix = f"az_net/block_{i}"
+        _set_conv(block.conv1, _get(params, f"{prefix}/conv2_d"))
+        _set_batch_norm(
+            block.bn1,
+            _get(params, f"{prefix}/batch_norm"),
+            _get(state, f"{prefix}/batch_norm/~/mean_ema"),
+            _get(state, f"{prefix}/batch_norm/~/var_ema"),
+        )
+        _set_conv(block.conv2, _get(params, f"{prefix}/conv2_d_1"))
+        _set_batch_norm(
+            block.bn2,
+            _get(params, f"{prefix}/batch_norm_1"),
+            _get(state, f"{prefix}/batch_norm_1/~/mean_ema"),
+            _get(state, f"{prefix}/batch_norm_1/~/var_ema"),
+        )
+
+    # Policy head
+    _set_conv(model.policy_conv, _get(params, "az_net/conv2_d_1"))
+    _set_batch_norm(
+        model.policy_bn,
+        _get(params, "az_net/batch_norm_1"),
+        _get(state, "az_net/batch_norm_1/~/mean_ema"),
+        _get(state, "az_net/batch_norm_1/~/var_ema"),
+    )
+    _set_linear(model.policy_linear, _get(params, "az_net/linear"))
+
+    # Value head
+    _set_conv(model.value_conv, _get(params, "az_net/conv2_d_2"))
+    _set_batch_norm(
+        model.value_bn,
+        _get(params, "az_net/batch_norm_2"),
+        _get(state, "az_net/batch_norm_2/~/mean_ema"),
+        _get(state, "az_net/batch_norm_2/~/var_ema"),
+    )
+    _set_linear(model.value_linear1, _get(params, "az_net/linear_1"))
+    _set_linear(model.value_linear2, _get(params, "az_net/linear_2"))
+
+
+def _convert_minatar_params(model, params):
+    """Copy a Haiku MinAtar PPO parameter tree into an NNX module."""
+    _set_conv(model.conv, _get(params, "actor_critic/conv2_d"))
+    _set_linear(model.fc, _get(params, "actor_critic/linear"))
+    _set_linear(model.actor1, _get(params, "actor_critic/linear_1"))
+    _set_linear(model.actor2, _get(params, "actor_critic/linear_2"))
+    _set_linear(model.actor_out, _get(params, "actor_critic/linear_3"))
+    _set_linear(model.critic1, _get(params, "actor_critic/linear_4"))
+    _set_linear(model.critic2, _get(params, "actor_critic/linear_5"))
+    _set_linear(model.critic_out, _get(params, "actor_critic/linear_6"))
+
+
+def _avg_pool2x2(x):
+    """Match ``hk.avg_pool(x, (2, 2), (2, 2), "VALID")`` for NHWC inputs.
+
+    Haiku prepends leading ones to the window shape when it has fewer entries
+    than the input rank, so the window is applied to the width and channel
+    axes (not height and width). The pretrained MinAtar baselines were trained
+    with this behaviour, so it is preserved here.
+    """
+    batch, height, width, channels = x.shape
+    width2, channels2 = width // 2, channels // 2
+    x = x[:, :, : width2 * 2, : channels2 * 2]
+    x = x.reshape((batch, height, width2, 2, channels2, 2))
+    return jnp.mean(x, axis=(3, 5))
+
+
+# ---------------------------------------------------------------------------
+# Models (kept in this module so `flax` remains an optional dependency)
+# ---------------------------------------------------------------------------
+
+
 def _create_az_model_v0(
     num_actions,
     num_channels: int = 128,
     num_layers: int = 6,
     resnet_v2: bool = True,
+    *,
+    in_shape: Sequence[int],
+    rngs=None,
 ):
-    # We referred to Haiku's ResNet implementation:
-    # https://github.com/deepmind/dm-haiku/blob/main/haiku/_src/nets/resnet.py
-    import haiku as hk
+    from flax import nnx
 
-    class BlockV1(hk.Module):
-        def __init__(self, num_channels, name="BlockV1"):
-            super(BlockV1, self).__init__(name=name)
-            self.num_channels = num_channels
+    class BlockV1(nnx.Module):
+        def __init__(self, num_channels: int, *, rngs: nnx.Rngs):
+            self.conv1 = nnx.Conv(num_channels, num_channels, kernel_size=(3, 3), padding="SAME", rngs=rngs)
+            self.bn1 = nnx.BatchNorm(num_channels, momentum=0.9, epsilon=1e-5, rngs=rngs)
+            self.conv2 = nnx.Conv(num_channels, num_channels, kernel_size=(3, 3), padding="SAME", rngs=rngs)
+            self.bn2 = nnx.BatchNorm(num_channels, momentum=0.9, epsilon=1e-5, rngs=rngs)
 
-        def __call__(self, x, is_training, test_local_stats):
-            i = x
-            x = hk.Conv2D(self.num_channels, kernel_shape=3)(x)
-            x = hk.BatchNorm(True, True, 0.9)(x, is_training, test_local_stats)
-            x = jax.nn.relu(x)
-            x = hk.Conv2D(self.num_channels, kernel_shape=3)(x)
-            x = hk.BatchNorm(True, True, 0.9)(x, is_training, test_local_stats)
-            return jax.nn.relu(x + i)
+        def __call__(self, x):
+            residual = x
+            x = nnx.relu(self.bn1(self.conv1(x)))
+            x = self.bn2(self.conv2(x))
+            return nnx.relu(x + residual)
 
-    class BlockV2(hk.Module):
-        def __init__(self, num_channels, name="BlockV2"):
-            super(BlockV2, self).__init__(name=name)
-            self.num_channels = num_channels
+    class BlockV2(nnx.Module):
+        def __init__(self, num_channels: int, *, rngs: nnx.Rngs):
+            self.bn1 = nnx.BatchNorm(num_channels, momentum=0.9, epsilon=1e-5, rngs=rngs)
+            self.conv1 = nnx.Conv(num_channels, num_channels, kernel_size=(3, 3), padding="SAME", rngs=rngs)
+            self.bn2 = nnx.BatchNorm(num_channels, momentum=0.9, epsilon=1e-5, rngs=rngs)
+            self.conv2 = nnx.Conv(num_channels, num_channels, kernel_size=(3, 3), padding="SAME", rngs=rngs)
 
-        def __call__(self, x, is_training, test_local_stats):
-            i = x
-            x = hk.BatchNorm(True, True, 0.9)(x, is_training, test_local_stats)
-            x = jax.nn.relu(x)
-            x = hk.Conv2D(self.num_channels, kernel_shape=3)(x)
-            x = hk.BatchNorm(True, True, 0.9)(x, is_training, test_local_stats)
-            x = jax.nn.relu(x)
-            x = hk.Conv2D(self.num_channels, kernel_shape=3)(x)
-            return x + i
+        def __call__(self, x):
+            residual = x
+            x = nnx.relu(self.bn1(x))
+            x = self.conv1(x)
+            x = nnx.relu(self.bn2(x))
+            x = self.conv2(x)
+            return x + residual
 
-    class AZNet(hk.Module):
+    class AZNet(nnx.Module):
         """AlphaZero NN architecture."""
 
         def __init__(
@@ -196,48 +297,128 @@ def _create_az_model_v0(
             num_channels: int,
             num_layers: int,
             resnet_v2: bool,
-            name="az_net",
+            in_shape: Sequence[int],
+            *,
+            rngs: nnx.Rngs,
         ):
-            super().__init__(name=name)
+            height, width, in_channels = (int(x) for x in in_shape)
             self.num_actions = num_actions
             self.num_channels = num_channels
             self.num_layers = num_layers
             self.resnet_v2 = resnet_v2
-            self.resnet_cls = BlockV2 if resnet_v2 else BlockV1
+            self.in_shape = (height, width, in_channels)
 
-        def __call__(self, x, is_training, test_local_stats):
+            self.conv_init = nnx.Conv(in_channels, num_channels, kernel_size=(3, 3), padding="SAME", rngs=rngs)
+            if not resnet_v2:
+                self.bn_init = nnx.BatchNorm(num_channels, momentum=0.9, epsilon=1e-5, rngs=rngs)
+
+            block_cls = BlockV2 if resnet_v2 else BlockV1
+            self.blocks = nnx.List([block_cls(num_channels, rngs=rngs) for _ in range(num_layers)])
+
+            if resnet_v2:
+                self.bn_final = nnx.BatchNorm(num_channels, momentum=0.9, epsilon=1e-5, rngs=rngs)
+
+            # Policy head
+            self.policy_conv = nnx.Conv(num_channels, 2, kernel_size=(1, 1), padding="SAME", rngs=rngs)
+            self.policy_bn = nnx.BatchNorm(2, momentum=0.9, epsilon=1e-5, rngs=rngs)
+            self.policy_linear = nnx.Linear(2 * height * width, num_actions, rngs=rngs)
+
+            # Value head
+            self.value_conv = nnx.Conv(num_channels, 1, kernel_size=(1, 1), padding="SAME", rngs=rngs)
+            self.value_bn = nnx.BatchNorm(1, momentum=0.9, epsilon=1e-5, rngs=rngs)
+            self.value_linear1 = nnx.Linear(height * width, num_channels, rngs=rngs)
+            self.value_linear2 = nnx.Linear(num_channels, 1, rngs=rngs)
+
+        def __call__(self, x):
             x = x.astype(jnp.float32)
-            x = hk.Conv2D(self.num_channels, kernel_shape=3)(x)
+            x = self.conv_init(x)
 
             if not self.resnet_v2:
-                x = hk.BatchNorm(True, True, 0.9)(x, is_training, test_local_stats)
-                x = jax.nn.relu(x)
+                x = nnx.relu(self.bn_init(x))
 
-            for i in range(self.num_layers):
-                x = self.resnet_cls(self.num_channels, name=f"block_{i}")(x, is_training, test_local_stats)
+            for block in self.blocks:
+                x = block(x)
 
             if self.resnet_v2:
-                x = hk.BatchNorm(True, True, 0.9)(x, is_training, test_local_stats)
-                x = jax.nn.relu(x)
+                x = nnx.relu(self.bn_final(x))
 
-            # policy head
-            logits = hk.Conv2D(output_channels=2, kernel_shape=1)(x)
-            logits = hk.BatchNorm(True, True, 0.9)(logits, is_training, test_local_stats)
-            logits = jax.nn.relu(logits)
-            logits = hk.Flatten()(logits)
-            logits = hk.Linear(self.num_actions)(logits)
+            # Policy head
+            logits = self.policy_conv(x)
+            logits = nnx.relu(self.policy_bn(logits))
+            logits = logits.reshape((logits.shape[0], -1))
+            logits = self.policy_linear(logits)
 
-            # value head
-            value = hk.Conv2D(output_channels=1, kernel_shape=1)(x)
-            value = hk.BatchNorm(True, True, 0.9)(value, is_training, test_local_stats)
-            value = jax.nn.relu(value)
-            value = hk.Flatten()(value)
-            value = hk.Linear(self.num_channels)(value)
-            value = jax.nn.relu(value)
-            value = hk.Linear(1)(value)
+            # Value head
+            value = self.value_conv(x)
+            value = nnx.relu(self.value_bn(value))
+            value = value.reshape((value.shape[0], -1))
+            value = nnx.relu(self.value_linear1(value))
+            value = self.value_linear2(value)
             value = jnp.tanh(value)
             value = value.reshape((-1,))
 
             return logits, value
 
-    return AZNet(num_actions, num_channels, num_layers, resnet_v2)
+    if rngs is None:
+        rngs = nnx.Rngs(0)
+    return AZNet(
+        num_actions,
+        num_channels,
+        num_layers,
+        resnet_v2,
+        in_shape,
+        rngs=rngs,
+    )
+
+
+def _create_minatar_model(
+    num_actions,
+    activation: str = "tanh",
+    *,
+    in_shape: Sequence[int],
+    rngs=None,
+):
+    from flax import nnx
+
+    assert activation in ["relu", "tanh"]
+
+    class ActorCritic(nnx.Module):
+        def __init__(self, num_actions, activation, in_shape, *, rngs: nnx.Rngs):
+            height, width, in_channels = (int(x) for x in in_shape)
+            self.num_actions = num_actions
+            self.activation = activation
+
+            self.conv = nnx.Conv(in_channels, 32, kernel_size=(2, 2), padding="SAME", rngs=rngs)
+            flat_features = height * (width // 2) * (32 // 2)
+            self.fc = nnx.Linear(flat_features, 64, rngs=rngs)
+
+            self.actor1 = nnx.Linear(64, 64, rngs=rngs)
+            self.actor2 = nnx.Linear(64, 64, rngs=rngs)
+            self.actor_out = nnx.Linear(64, num_actions, rngs=rngs)
+
+            self.critic1 = nnx.Linear(64, 64, rngs=rngs)
+            self.critic2 = nnx.Linear(64, 64, rngs=rngs)
+            self.critic_out = nnx.Linear(64, 1, rngs=rngs)
+
+        def __call__(self, x):
+            x = x.astype(jnp.float32)
+            activation = jax.nn.relu if self.activation == "relu" else jax.nn.tanh
+
+            x = nnx.relu(self.conv(x))
+            x = _avg_pool2x2(x)
+            x = x.reshape((x.shape[0], -1))
+            x = nnx.relu(self.fc(x))
+
+            actor_mean = activation(self.actor1(x))
+            actor_mean = activation(self.actor2(actor_mean))
+            actor_mean = self.actor_out(actor_mean)
+
+            critic = activation(self.critic1(x))
+            critic = activation(self.critic2(critic))
+            critic = self.critic_out(critic)
+
+            return actor_mean, jnp.squeeze(critic, axis=-1)
+
+    if rngs is None:
+        rngs = nnx.Rngs(0)
+    return ActorCritic(num_actions, activation, in_shape, rngs=rngs)

@@ -133,9 +133,13 @@ class AwariOraclePlayer(ExternalPlayer):
 
     def play(self, env, swap_color, trace, verbose):
         observe = env.observation
-        obs = observe[0,0]
 
-        #print("play from observation", obs)
+        # debug:
+        #import numpy as np
+        #np.set_printoptions(threshold=np.inf)
+        #print("play from observation", observe)
+
+        obs = observe[0,0]
 
         pieces = self.obs_to_pieces(observe)
         if verbose:
@@ -219,7 +223,7 @@ class AwariOraclePlayer(ExternalPlayer):
         if verbose:
             print('op: select ' + str(select))
 
-        return select
+        return select, scores
 
     def evaluate(self, env, action, verbose):
         observe = env.observation
@@ -270,9 +274,15 @@ class AwariOraclePlayer(ExternalPlayer):
         return (scores[action] - best)
 
     def obs_to_pieces(self, observe):
-        pieces = [ int(observe[0,0,0,0]), int(observe[0,0,1,0]), int(observe[0,0,2,0]), int(observe[0,0,3,0]),
-                   int(observe[0,0,4,0]), int(observe[0,0,5,0]), int(observe[0,1,0,1]), int(observe[0,1,1,1]),
-                   int(observe[0,1,2,1]), int(observe[0,1,3,1]), int(observe[0,1,4,1]), int(observe[0,1,5,1]) ]
+        #pieces = [ int(observe[0,0,0,0]), int(observe[0,0,1,0]), int(observe[0,0,2,0]), int(observe[0,0,3,0]),
+        #           int(observe[0,0,4,0]), int(observe[0,0,5,0]), int(observe[0,1,0,1]), int(observe[0,1,1,1]),
+        #           int(observe[0,1,2,1]), int(observe[0,1,3,1]), int(observe[0,1,4,1]), int(observe[0,1,5,1]) ]
+        # there may be some extra indicator planes in front of the actual seed fields
+        off = len(observe[0,0,0]) - 4
+        pieces = [ int(observe[0,0,0,off+0]), int(observe[0,0,1,off+0]), int(observe[0,0,2,off+0]),
+                   int(observe[0,0,3,off+0]), int(observe[0,0,4,off+0]), int(observe[0,0,5,off+0]),
+                   int(observe[0,1,0,off+1]), int(observe[0,1,1,off+1]), int(observe[0,1,2,off+1]),
+                   int(observe[0,1,3,off+1]), int(observe[0,1,4,off+1]), int(observe[0,1,5,off+1]) ]
         # print("pieces", pieces)
         return pieces
 

@@ -115,7 +115,7 @@ class GoOraclePlayer(ExternalPlayer):
         if self.debug:
             print('op: select ' + str(select))
 
-        return select
+        return select, []
 
     def print_oracle_status(self, state, trace, swap_color):
         # TODO print actual oracle status, now only done verbose above in play()

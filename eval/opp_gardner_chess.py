@@ -140,7 +140,7 @@ class GardnerOraclePlayer(ExternalPlayer):
         if self.debug:
             print('op: select ' + str(select))
 
-        return select
+        return select, []
 
     def fen_to_board(self, fen):
         """Converts a FEN string to a 2D list representing the chessboard.

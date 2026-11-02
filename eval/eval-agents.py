@@ -19,32 +19,26 @@ databases, and external applications for Othello (Edax), Go-9x9x (KataGo, Pachi)
 and Gardner Chess (Fairy-Stockfish).
 """
 
-from typing import NamedTuple
-
-import jax
-import pgx
-from pgx.experimental import act_randomly
-import mctx
-
+import os
 import pickle
 import random
-import warnings
-from functools import partial
-from typing import NamedTuple
-from typing import Tuple, TypeVar
-from pydantic import BaseModel
+from typing import TypeVar
 
-from omegaconf import OmegaConf
-from examples.alphazero.network import AZNet
-from examples.alphazero.train import recurrent_fn
-import optax
-import haiku as hk
-
-import chex
 import jax
 import jax.numpy as jnp
-from fire import Fire
-import os
+import mctx
+from flax import nnx
+from omegaconf import OmegaConf
+from opp_awari import AwariOraclePlayer
+from opp_connect4 import Connect4OraclePlayer
+from opp_gardner_chess import GardnerOraclePlayer
+from opp_go_9x9 import GoOraclePlayer
+from opp_othello import OthelloOraclePlayer
+from pydantic import BaseModel
+
+import pgx
+from examples.alphazero.network import AZNet
+from pgx.experimental import act_randomly
 
 # Most agent/oracle configuration settings regarding playing strength
 # and specific models used are currently configured via the environment.
@@ -84,11 +78,16 @@ OTHELLO_ORACLE_ENABLE = True
 GO_ORACLE_ENABLE = True
 
 # Enable second oracle, i.e., checking relative strength of different oracle levels?
-AWARI_ORACLE_ENABLE2 = False
+# AWARI_ORACLE_ENABLE2 = False
+# AWARI_ORACLE_ENABLE2 = True
+AWARI_ORACLE_ENABLE2 = bool(os.getenv("AWARI_ORACLE_ENABLE2", 0))
+# print("AWARI_ORACLE_ENABLE2", AWARI_ORACLE_ENABLE2)
 GARDNER_ORACLE_ENABLE2 = False
 OTHELLO_ORACLE_ENABLE2 = False
 GO_ORACLE_ENABLE2 = False
 # GO_ORACLE_ENABLE2 = True
+CONNECT4_ORACLE_ENABLE2 = bool(os.getenv("CONNECT4_ORACLE_ENABLE2", 0))
+print("CONNECT4_ORACLE_ENABLE2", CONNECT4_ORACLE_ENABLE2)
 
 # For oracles/agents that have a configurable mistake chance:
 ORACLE_MISTAKE_CHANCE = os.getenv("ORACLE_MISTAKE_CHANCE", "0.20")
@@ -126,12 +125,13 @@ RAND_SEED = int(RAND_SEED)
 
 eval_batch_size = 1
 
+
 class Config(BaseModel):
     # env_id: pgx.EnvId = "go_9x9"
     # env_id: pgx.EnvId = "awari"
     env_id: pgx.EnvId = ENV_ID
     # seed: int = 0
-    seed: int = RAND_SEED 
+    seed: int = RAND_SEED
     # max_num_iters: int = 400
     max_num_iters: int = 2000
     # network params
@@ -152,7 +152,11 @@ class Config(BaseModel):
     class Config:
         extra = "forbid"
 
-config = Config()
+
+# config = Config()
+conf_dict = OmegaConf.from_cli()
+config: Config = Config(**conf_dict)
+print(config)
 
 env = pgx.make(config.env_id)
 
@@ -162,32 +166,55 @@ act_randomly = jax.jit(act_randomly)
 
 T = TypeVar("T")
 
+
 def replicate(value: T, repeat: int) -> T:
     """Replicate along the first axis."""
     return jax.tree_util.tree_map(lambda x: jnp.stack([x] * repeat), value)
+
+
+def _config_value(config, name):
+    if isinstance(config, dict):
+        return config[name]
+    return getattr(config, name)
+
 
 def make_az_model_replicated(filename):
     print("loading", filename)
     with open(filename, "rb") as f:
         d = pickle.load(f)
 
-    # print("pickled model params", d.keys())
-    optimizer = optax.adam(learning_rate=config.learning_rate)
-    model_config, model, opt_state = d["config"], d["model"], d["opt_state"]
-    optimizer.init(opt_state)
-    model_params, model_state = model
+    model_config, model_data = d["config"], d["model"]
+    model = AZNet(
+        num_actions=env.num_actions,
+        in_shape=env.observation_shape,
+        num_channels=_config_value(model_config, "num_channels"),
+        num_blocks=_config_value(model_config, "num_layers"),
+        resnet_v2=_config_value(model_config, "resnet_v2"),
+        rngs=nnx.Rngs(0),
+    )
 
+    if isinstance(model_data, tuple):
+        # Checkpoint written by the legacy Haiku implementation.
+        from pgx._src.baseline import _convert_az_params
+
+        params, state = model_data
+        _convert_az_params(
+            model,
+            params,
+            state,
+            resnet_v2=_config_value(model_config, "resnet_v2"),
+        )
+    else:
+        nnx.update(model, model_data)
+
+    model.eval()
     devices = jax.local_devices()
-    model, opt_state = jax.device_put_replicated((model, opt_state), devices)
+    graphdef, state = nnx.split(model)
+    model = nnx.merge(graphdef, replicate(state, len(devices)))
     return model
 
-from opp_awari import AwariOraclePlayer
-from opp_othello import OthelloOraclePlayer
-from opp_go_9x9 import GoOraclePlayer
-from opp_gardner_chess import GardnerOraclePlayer
-from opp_connect4 import Connect4OraclePlayer
 
-def print_board(state, first_player, swap_color):
+def print_board(state, first_player, swap_color):  # noqa: C901
     if ENV_ID == "awari":
         board = state._x.board[0]
         print("   ", end="")
@@ -265,72 +292,203 @@ def print_board(state, first_player, swap_color):
     elif ENV_ID == "gardner_chess":
         fen_str = state._to_fen()
         # print("fen:", fen_str)
-        for row_fen in fen_str.split('/'):
-              line = ""
-              for char in row_fen:
-                  if char == ' ':
-                      # remaining non board data after this
-                      break
-                  empty = 0
-                  if char.isdigit():
-                      empty = int(char)
-                  elif char == 'p':
-                      piece = '♟'
-                  elif char == 'P':
-                      piece = '♙'
-                  elif char == 'r':
-                      piece = '♜'
-                  elif char == 'R':
-                      piece = '♖'
-                  elif char == 'n':
-                      piece = '♞'
-                  elif char == 'N':
-                      piece = '♘'
-                  elif char == 'b':
-                      piece = '♝'
-                  elif char == 'B':
-                      piece = '♗'
-                  elif char == 'q':
-                      piece = '♛'
-                  elif char == 'Q':
-                      piece = '♕'
-                  elif char == 'k':
-                      piece = '♚'
-                  elif char == 'K':
-                      piece = '♔'
-                  else:
-                      piece = '?'
-                  if empty > 0:
-                      line += (". " * empty)
-                  else:
-                      line += piece + " "
-              print(line)
+        for row_fen in fen_str.split("/"):
+            line = ""
+            for char in row_fen:
+                if char == " ":
+                    # remaining non board data after this
+                    break
+                empty = 0
+                if char.isdigit():
+                    empty = int(char)
+                elif char == "p":
+                    piece = "♟"
+                elif char == "P":
+                    piece = "♙"
+                elif char == "r":
+                    piece = "♜"
+                elif char == "R":
+                    piece = "♖"
+                elif char == "n":
+                    piece = "♞"
+                elif char == "N":
+                    piece = "♘"
+                elif char == "b":
+                    piece = "♝"
+                elif char == "B":
+                    piece = "♗"
+                elif char == "q":
+                    piece = "♛"
+                elif char == "Q":
+                    piece = "♕"
+                elif char == "k":
+                    piece = "♚"
+                elif char == "K":
+                    piece = "♔"
+                else:
+                    piece = "?"
+                if empty > 0:
+                    line += ". " * empty
+                else:
+                    line += piece + " "
+            print(line)
+    elif ENV_ID == "tic_tac_toe":
+        board = state._x.board[0]
+        for y in range(3):
+            for x in range(3):
+                stone = board[3 * y + x]
+                if stone < 0:
+                    print(". ", end="")
+                elif stone > 0:
+                    print("X ", end="")
+                else:
+                    print("O ", end="")
+            print("")
+        print("")
     else:
         # just print full state datastructure
         print(state)
 
-# PGX' internal simplified evaluation, based on examples/alphazeroo/train.py
 
-def forward_fn(x, is_eval=False):
-    net = AZNet(
-        num_actions=env.num_actions,
-        num_channels=config.num_channels,
-        num_blocks=config.num_layers,
-        resnet_v2=config.resnet_v2,
+def print_board_csv(state, first_player, swap_color):
+    if ENV_ID == "awari":
+        board = state._x.board[0]
+        # board state orientation depends on who started first
+        for i in range(6):
+            if first_player == 0:
+                cell = board[11 - i]
+            else:
+                cell = board[5 - i]
+            print(f"{cell},", end="")
+        print(" ", end="")
+        for i in range(6):
+            if first_player == 0:
+                cell = board[i]
+            else:
+                cell = board[i + 6]
+            print(f"{cell},", end="")
+        print(" ", end="")
+        if first_player == 0:
+            print(f"{board[23]},", end="")
+        else:
+            print(f"{board[17]},", end="")
+        if first_player == 0:
+            print(f"{board[17]},", end="")
+        else:
+            print(f"{board[23]},", end="")
+        print(" ", end="")
+    elif ENV_ID == "connect_four":
+        board = state._x.board[0]
+        if swap_color:
+            this_player = 1
+        else:
+            this_player = 0
+        for player in range(2):
+            for y in range(6):
+                for x in range(7):
+                    stone = board[7 * y + x]
+                    if stone < 0:
+                        print("0,", end="")
+                    elif stone > 0:
+                        if player == this_player:
+                            print("1,", end="")
+                        else:
+                            print("0,", end="")
+                    else:
+                        if player == this_player:
+                            print("0,", end="")
+                        else:
+                            print("1,", end="")
+            print(" ", end="")
+        # print("")
+    else:
+        # just print full state datastructure
+        print(state)
+
+
+def print_game(env, g, model1, model2, result, first_reversed):
+    verbose = True
+    print("game", model1, "against", model2, "result", result)
+    # For pgn conversion:
+    if first_reversed:
+        if result == 1:
+            print("agent1_win_as_second")
+        elif result == -1:
+            print("agent2_win_as_first")
+        else:
+            print("draw result, agent2 started")
+    else:
+        if result == 1:
+            print("agent1_win_as_first")
+        elif result == -1:
+            print("agent2_win_as_second")
+        else:
+            print("draw result, agent1 started")
+    if True:
+        # not default
+        key = jax.random.PRNGKey(RAND_SEED)
+        keys = jax.random.split(key, eval_batch_size)
+        state = jax.vmap(env.init)(keys)
+        first_player = state.current_player
+        swap_color = state.current_player != first_player
+        if verbose:
+            print_board(state, first_player, swap_color)
+        for i in range(len(g)):
+            if g[i][1] != 0:
+                print("total number of moves:", i)
+                break
+            move_id = g[i][0]
+            action = jnp.int32([move_id])
+            state = jax.vmap(env.step)(state, action)
+            swap_color = state.current_player != first_player
+            if verbose:
+                print("move", i)
+                print()
+                print_board(state, first_player, swap_color)
+                print()
+    else:
+        # Just print game length for sanity checks
+        for i in range(len(g)):
+            if g[i][1] != 0:
+                print("total number of moves:", i)
+                break
+
+
+# PGX' internal simplified evaluation, based on examples/alphazero/train.py
+
+
+def recurrent_fn(model: AZNet, rng_key: jnp.ndarray, action: jnp.ndarray, state: pgx.State):
+    # model: the NNX network (must be in eval mode)
+    # state: embedding
+    del rng_key
+
+    current_player = state.current_player
+    state = jax.vmap(env.step)(state, action)
+
+    logits, value = model(state.observation)
+    # mask invalid actions
+    logits = logits - jnp.max(logits, axis=-1, keepdims=True)
+    logits = jnp.where(state.legal_action_mask, logits, jnp.finfo(logits.dtype).min)
+
+    reward = state.rewards[jnp.arange(state.rewards.shape[0]), current_player]
+    value = jnp.where(state.terminated, 0.0, value)
+    discount = -1.0 * jnp.ones_like(value)
+    discount = jnp.where(state.terminated, 0.0, discount)
+
+    recurrent_fn_output = mctx.RecurrentFnOutput(
+        reward=reward,
+        discount=discount,
+        prior_logits=logits,
+        value=value,
     )
-    policy_out, value_out = net(x, is_training=not is_eval, test_local_stats=False)
-    return policy_out, value_out
+    return recurrent_fn_output, state
 
-forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
-optimizer = optax.adam(learning_rate=config.learning_rate)
 
-@jax.pmap
-def evaluate_self(rng_key, my_model, prev_model):
+@nnx.pmap(in_axes=0)
+def evaluate_self(rng_key, my_model: AZNet, prev_model: AZNet):
     """A simplified evaluation by sampling. Only for debugging.
     Please use MCTS and run tournaments for serious evaluation."""
     my_player = 0
-    my_model_parmas, my_model_state = my_model
-    prev_model_parmas, prev_model_state = prev_model
 
     key, subkey = jax.random.split(rng_key)
     # batch_size = config.selfplay_batch_size // num_devices
@@ -340,13 +498,8 @@ def evaluate_self(rng_key, my_model, prev_model):
 
     def body_fn(val):
         key, state, R = val
-        (my_logits, _), _ = forward.apply(
-            my_model_parmas, my_model_state, state.observation, is_eval=True
-        )
-        # opp_logits, _ = baseline(state.observation)
-        (opp_logits, _), _ = forward.apply(
-            prev_model_parmas, prev_model_state, state.observation, is_eval=True
-        )
+        my_logits, _ = my_model(state.observation)
+        opp_logits, _ = prev_model(state.observation)
         is_my_turn = (state.current_player == my_player).reshape((-1, 1))
         logits = jnp.where(is_my_turn, my_logits, opp_logits)
         key, subkey = jax.random.split(key)
@@ -355,29 +508,34 @@ def evaluate_self(rng_key, my_model, prev_model):
         R = R + state.rewards[jnp.arange(batch_size), my_player]
         return (key, state, R)
 
-    _, _, R = jax.lax.while_loop(
-        lambda x: ~(x[1].terminated.all()), body_fn, (key, state, jnp.zeros(batch_size))
-    )
+    _, _, R = jax.lax.while_loop(lambda x: ~(x[1].terminated.all()), body_fn, (key, state, jnp.zeros(batch_size)))
     return R
+
 
 # model evalution with mctx, based on examples/alphazero/train.py
 
-def az_action_unbatched(state, model, rng_key: jnp.ndarray, num_simulations_per_move):
-    model_params, model_state = model
-    model_params, model_state = jax.tree.map(lambda x: x[0], (model_params, model_state))
 
-    (logits, value), _ = forward.apply(
-            model_params, model_state, state.observation, is_eval=True
-    )
+def az_action_unbatched(state, model, rng_key: jnp.ndarray, num_simulations_per_move):
+    graphdef, model_state = nnx.split(model)
+    model_state = jax.tree.map(lambda x: x[0], model_state)
+    model = nnx.merge(graphdef, model_state)
+    model.eval()
+
+    logits, value = model(state.observation)
 
     root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
 
+    def recurrent_fn_with_model(params, key, action, embedding):
+        del params
+        return recurrent_fn(model, key, action, embedding)
+
     key1, key2 = jax.random.split(rng_key)
     policy_output = mctx.gumbel_muzero_policy(
-        params=(model_params, model_state),
+        # mctx threads `params` through JAX control flow, so it must be a pytree.
+        params=(),
         rng_key=key1,
         root=root,
-        recurrent_fn=recurrent_fn,
+        recurrent_fn=recurrent_fn_with_model,
         # num_simulations=config.num_simulations,
         num_simulations=num_simulations_per_move,
         invalid_actions=~state.legal_action_mask,
@@ -389,7 +547,7 @@ def az_action_unbatched(state, model, rng_key: jnp.ndarray, num_simulations_per_
     return policy_output.action
 
 
-def agent_vs_oracle(
+def agent_vs_oracle(  # noqa: C901
     # agent,
     # env: Enviroment,
     disable_mcts: bool = False,
@@ -414,13 +572,12 @@ def agent_vs_oracle(
     oracle_mistake_max2 = ORACLE_MISTAKE_MAX2
     oracle_depth2 = ORACLE_DEPTH2
     oracle_time2 = ORACLE_TIME2
-    
-    model = make_az_model_replicated(CHECKPOINT)
+
+    model2 = None
+    model1 = make_az_model_replicated(CHECKPOINT)
 
     if CHECKPOINT2 != "":
         model2 = make_az_model_replicated(CHECKPOINT2)
-    else:
-        model2 = None
 
     result_agent_win = 0
     result_agent_win_as_first = 0
@@ -434,12 +591,12 @@ def agent_vs_oracle(
     # too many similar/same games which would perturb the statistics
     if ENV_ID == "othello":
         try:
-            with open('openingslarge.txt', 'r') as file:
+            with open("openingslarge.txt", "r") as file:
                 openings = file.readlines()
             if debug:
                 print("openings[0]", openings[0])
                 # e.g. f5d6c4d3c2b3b4b5
-        except:
+        except OSError:
             print("no Othello opening randomization support")
             openings = []
 
@@ -451,6 +608,8 @@ def agent_vs_oracle(
             external_player2 = AwariOraclePlayer(oracle_mistake_chance2, oracle_mistake_max2)
     elif ENV_ID == "connect_four" and CONNECT4_ORACLE_ENABLE:
         external_player = Connect4OraclePlayer(oracle_mistake_chance, oracle_mistake_max)
+        if CONNECT4_ORACLE_ENABLE2:
+            external_player2 = Connect4OraclePlayer(oracle_mistake_chance2, oracle_mistake_max2)
     elif ENV_ID == "gardner_chess" and GARDNER_ORACLE_ENABLE:
         external_player = GardnerOraclePlayer(ORACLE_DEPTH, ORACLE_TIME)
         if GARDNER_ORACLE_ENABLE2:
@@ -466,8 +625,8 @@ def agent_vs_oracle(
 
     for game_id in range(num_games):
         # flip starting player
-        agent_turn = ((game_id + 1) % 2)
-        agent_started = ((agent_turn % 2) == 0)
+        agent_turn = (game_id + 1) % 2
+        agent_started = (agent_turn % 2) == 0
         if verbose:
             print()
             print("game_id", game_id)
@@ -503,21 +662,24 @@ def agent_vs_oracle(
             for i in range(int(len(initial_actions) / 2)):
                 action_letter = initial_actions[2 * i]
                 action_number = initial_actions[2 * i + 1]
-                move_id = (ord(action_number) - ord('1')) * 8 + (ord(action_letter) - ord('a'))
+                move_id = (ord(action_number) - ord("1")) * 8 + (ord(action_letter) - ord("a"))
                 if debug:
                     valid = state.legal_action_mask[0]
                     print("valid: ", end="")
                     for j in range(valid.size):
-                         if valid[j]:
-                             print(" " + str(j), end="")
+                        if valid[j]:
+                            print(" " + str(j), end="")
                     print()
                     print("move", i, ":", action_letter + action_number, " = ", move_id)
                 action = jnp.int32([move_id])
                 state = step_fn(state, action)
                 if debug:
-                    print("state:", state,  "observation", state.observation, "legal_action_mask", state.legal_action_mask)
-                swap_color = (state.current_player != first_player)
-                print_board(state, first_player, swap_color)
+                    print(
+                        "state:", state, "observation", state.observation, "legal_action_mask", state.legal_action_mask
+                    )
+                swap_color = state.current_player != first_player
+                if verbose:
+                    print_board(state, first_player, swap_color)
                 move_trace.append(move_id)
 
         # limit number of moves to 256 to protect against infinite loops,
@@ -532,24 +694,26 @@ def agent_vs_oracle(
             if state.terminated.all():
                 break
 
-            dont_use_oracle = ((((move % 2) == agent_turn) or external_player == None) and (external_player2 == None)) or (model2 != None)
+            dont_use_oracle = (
+                (((move % 2) == agent_turn) or external_player is None) and (external_player2 is None)
+            ) or (model2 is not None)
             if dont_use_oracle:
                 if debug:
                     print("current_player", state.current_player)
                     print("legal_action_mask", state.legal_action_mask)
                     print("rewards", state.rewards)
 
-                if ((external_player == None) or (model2 == None)) and  (move % 2 != agent_turn):
+                if ((external_player is None) or (model2 is None)) and (move % 2 != agent_turn):
                     action = act_randomly(subkey, state.legal_action_mask)
                     if verbose:
                         print("RANDOM action:", action)
                 else:
                     # do alpha zero action, based on model whose turn it is and mcts search
                     key, subkey = jax.random.split(key)
-                    if (model2 != None and move % 2 != agent_turn):
-                         action = az_action_unbatched(state, model2, subkey, num_simulations_per_move)
+                    if model2 is not None and move % 2 != agent_turn:
+                        action = az_action_unbatched(state, model2, subkey, num_simulations_per_move)
                     else:
-                         action = az_action_unbatched(state, model, subkey, num_simulations_per_move)
+                        action = az_action_unbatched(state, model1, subkey, num_simulations_per_move)
 
                     if debug:
                         print("az_action_unbatched", action, "num_simulations_per_move", num_simulations_per_move)
@@ -562,20 +726,19 @@ def agent_vs_oracle(
                     print("model action", action[0])
             else:
                 # use external player for move
-                swap_color = (state.current_player != first_player)
+                swap_color = state.current_player != first_player
                 if debug:
                     external_player.print_oracle_status(state, move_trace, swap_color)
                     external_player.print_valid(state, swap_color, move_trace, verbose)
-                if ((move % 2) == agent_turn) and (external_player2 != None):
+                if ((move % 2) == agent_turn) and (external_player2 is not None):
                     # agent_turn is also used for oracle2
-                    action = external_player2.play(state, swap_color, move_trace, debug)
+                    action, scores = external_player2.play(state, swap_color, move_trace, debug)
                 else:
                     # action = external_player.play(state, swap_color, move_trace, debug)
-                    action = external_player.play(state, swap_color, move_trace, verbose)
+                    action, scores = external_player.play(state, swap_color, move_trace, verbose)
                 if debug:
                     print(f"# External opponent selected action {action}")
-                if action < 0 or action > len(state.legal_action_mask[0]) or \
-                    not state.legal_action_mask[0][action]:
+                if action < 0 or action > len(state.legal_action_mask[0]) or not state.legal_action_mask[0][action]:
                     # warn external agent returned invalid action, and quit game
                     print("INVALID action", action, "mask", state.legal_action_mask[0])
                     break
@@ -585,13 +748,22 @@ def agent_vs_oracle(
                 if ENV_ID == "awari" and eval_moves:
                     action_id = int(action[0])
                     eval_oracle.append(external_player.evaluate(state, action_id, debug))
+                if ENV_ID == "connect_four" or ENV_ID == "awari":
+                    print("MOVE", move, end="")
+                    print(", ", end="")
+                    print_board_csv(state, first_player, swap_color)
+                    for i in range(len(scores)):
+                        print(scores[i], end="")
+                        if i < len(scores) - 1:
+                            print(",", end="")
+                    print("")
 
             state = step_fn(state, action)
             move_trace.append(int(action[0]))
             if debug:
                 print("trace", move_trace)
             if verbose:
-                swap_color = (state.current_player != first_player)
+                swap_color = state.current_player != first_player
                 print_board(state, first_player, swap_color)
         else:
             print("Exceeded max move count")
@@ -605,7 +777,7 @@ def agent_vs_oracle(
         # of who started, so this needs to be accounted for since we want
         # to report rewards relative to who played first
         rewards = state.rewards
-        should_flip = (first_player != 0)
+        should_flip = first_player != 0
         if should_flip:
             if verbose:
                 print("flipping rewards", rewards)
@@ -620,63 +792,65 @@ def agent_vs_oracle(
             print()
             # env.render()
             # print("state", state)
-            swap_color = (state.current_player != first_player)
+            swap_color = state.current_player != first_player
             print_board(state, first_player, swap_color)
             print()
-            print("rewards[0,0]", rewards[0,0])
-                          
-        if rewards[0,0] == 1:
+            print("rewards[0,0]", rewards[0, 0])
+
+        if rewards[0, 0] == 1:
             if agent_started:
                 result_agent_win += 1
                 result_agent_win_as_first += 1
-                if verbose:
-                    print("agent_win_as_first")
+                print("agent_win_as_first")
             else:
                 result_oracle_win += 1
                 result_oracle_win_as_first += 1
-                if verbose:
-                    print("oracle_win_as_first")
-        elif rewards[0,0] == -1:
+                print("oracle_win_as_first")
+        elif rewards[0, 0] == -1:
             if agent_started:
                 result_oracle_win += 1
                 result_oracle_win_as_second += 1
-                if verbose:
-                    print("oracle_win_as_second")
+                print("oracle_win_as_second")
             else:
                 result_agent_win += 1
                 result_agent_win_as_second += 1
-                if verbose:
-                    print("agent_win_as_second")
+                print("agent_win_as_second")
         else:
             result_draw += 1
-            if verbose:
-                print("draw result")
+            print("draw result")
 
         if ENV_ID == "awari" and eval_moves:
             if eval_agent != []:
-                 print("eval agent", eval_agent)
+                print("eval agent", eval_agent)
             print("eval oracle", eval_oracle)
             if eval_oracle2 != []:
                 print("eval oracle2", eval_oracle2)
 
     print("agent_win", result_agent_win, "oracle_win", result_oracle_win, "draw", result_draw)
-    print("agent_win_as_first", result_agent_win_as_first, "agent_win_as_second", result_agent_win_as_second,
-          "oracle_win_as_first", result_oracle_win_as_first, "oracle_win_as_second", result_oracle_win_as_second,
-          "draw", result_draw)
-
+    print(
+        "agent_win_as_first",
+        result_agent_win_as_first,
+        "agent_win_as_second",
+        result_agent_win_as_second,
+        "oracle_win_as_first",
+        result_oracle_win_as_first,
+        "oracle_win_as_second",
+        result_oracle_win_as_second,
+        "draw",
+        result_draw,
+    )
 
 
 mode = "agent_vs_oracle"
 
-def main(
-    # num_simulations_per_move: int = NUM_SIMULATIONS,
-    verbose: bool = True,
-):
+if __name__ == "__main__":
+    verbose = True
     if mode == "agent_vs_oracle":
         agent_vs_oracle(
             num_simulations_per_move=NUM_SIMULATIONS,
             # num_games=2,
             num_games=20,
+            # num_games=200,
             verbose=verbose,
         )
     else:
@@ -685,16 +859,13 @@ def main(
         key, subkey = jax.random.split(key)
         keys = jax.random.split(subkey, 1)  # num_devices
 
-        model = make_az_model_replicated(CHECKPOINT)
+        model1 = make_az_model_replicated(CHECKPOINT)
         model2 = make_az_model_replicated(CHECKPOINT2)
 
-        R = evaluate_self(keys, model, model2)
+        R = evaluate_self(keys, model1, model2)
         print("number total", R.size)
-        opp = 'agent2'
-        print(f'eval/{opp}/avg_R', R.mean().item())
-        print(f'eval/{opp}/win_rate', ((R > 0).sum() / R.size).item())
-        print(f'eval/{opp}/draw_rate', ((R == 0).sum() / R.size).item())
-        print(f'eval/{opp}/lose_rate', ((R < 0).sum() / R.size).item())
-
-if __name__ == "__main__":
-    Fire(main)
+        opp = "agent2"
+        print(f"eval/{opp}/avg_R", R.mean().item())
+        print(f"eval/{opp}/win_rate", ((R > 0).sum() / R.size).item())
+        print(f"eval/{opp}/draw_rate", ((R == 0).sum() / R.size).item())
+        print(f"eval/{opp}/lose_rate", ((R < 0).sum() / R.size).item())
